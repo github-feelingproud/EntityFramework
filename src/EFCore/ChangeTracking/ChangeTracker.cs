@@ -19,8 +19,6 @@ namespace Microsoft.EntityFrameworkCore.ChangeTracking
     /// </summary>
     public class ChangeTracker : IInfrastructure<IStateManager>
     {
-        private IStateManager _stateManager;
-        private IChangeDetector _changeDetector;
         private IEntityEntryGraphIterator _graphIterator;
         private QueryTrackingBehavior _queryTrackingBehavior;
 
@@ -219,10 +217,10 @@ namespace Microsoft.EntityFrameworkCore.ChangeTracking
         }
 
         private IStateManager StateManager
-            => _stateManager ?? (_stateManager = Context.GetService<IStateManager>());
+            => ((IInfrastructure<IStateManager>)Context).Instance;
 
         private IChangeDetector ChangeDetector
-            => _changeDetector ?? (_changeDetector = Context.GetService<IChangeDetector>());
+            => ((IInfrastructure<IChangeDetector>)Context).Instance;
 
         private IEntityEntryGraphIterator GraphIterator
             => _graphIterator ?? (_graphIterator = Context.GetService<IEntityEntryGraphIterator>());

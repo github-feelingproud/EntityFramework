@@ -45,7 +45,15 @@ namespace Microsoft.EntityFrameworkCore
     ///         is discovered by convention, you can override the <see cref="OnModelCreating(ModelBuilder)" /> method.
     ///     </para>
     /// </remarks>
-    public class DbContext : IDisposable, IInfrastructure<IServiceProvider>, IDbContextPoolable
+    public class DbContext :
+        IDisposable,
+        IInfrastructure<IServiceProvider>,
+        IInfrastructure<IDbSetInitializer>,
+        IInfrastructure<IEntityFinderSource>,
+        IInfrastructure<IAsyncQueryProvider>,
+        IInfrastructure<IChangeDetector>,
+        IInfrastructure<IStateManager>,
+        IDbContextPoolable
     {
         private readonly DbContextOptions _options;
 
@@ -53,16 +61,17 @@ namespace Microsoft.EntityFrameworkCore
         private IDbSetInitializer _setInitializer;
         private IEntityFinderSource _entityFinderSource;
         private ChangeTracker _changeTracker;
-        private DatabaseFacade _database;
+        private IChangeDetector _changeDetector;
         private IStateManager _stateManager;
         private IEntityGraphAttacher _graphAttacher;
-        private IModel _model;
-        private ILogger _logger;
         private IAsyncQueryProvider _queryProvider;
-        private IDbContextPool _dbContextPool;
+        private IModel _model;
+        private DatabaseFacade _database;
 
         private bool _initializing;
         private IServiceScope _serviceScope;
+        private ILogger _logger;
+        private IDbContextPool _dbContextPool;
         private bool _disposed;
 
         /// <summary>
@@ -96,16 +105,19 @@ namespace Microsoft.EntityFrameworkCore
 
             _options = options;
 
-            ServiceProviderCache.Instance.GetOrAdd(options, providerRequired: false)
-                .GetRequiredService<IDbSetInitializer>()
-                .InitializeSets(this);
+            _setInitializer = ServiceProviderCache.Instance.GetOrAdd(options, providerRequired: false)
+                .GetRequiredService<IDbSetInitializer>();
+            _setInitializer.InitializeSets(this);
         }
 
         private IStateManager StateManager
             => _stateManager
                ?? (_stateManager = InternalServiceProvider.GetRequiredService<IStateManager>());
 
-        internal IAsyncQueryProvider QueryProvider
+        private IChangeDetector ChangeDetector
+            => _changeDetector ?? (_changeDetector = InternalServiceProvider.GetRequiredService<IChangeDetector>());
+
+        private IAsyncQueryProvider QueryProvider
             => _queryProvider ?? (_queryProvider = this.GetService<IAsyncQueryProvider>());
 
         private IServiceProvider InternalServiceProvider
@@ -179,6 +191,61 @@ namespace Microsoft.EntityFrameworkCore
         ///     </para>
         /// </summary>
         IServiceProvider IInfrastructure<IServiceProvider>.Instance => InternalServiceProvider;
+
+        /// <summary>
+        ///     <para>
+        ///         Gets the cached <see cref="IDbSetInitializer" />
+        ///     </para>
+        ///     <para>
+        ///         This property is intended for use by extension methods. It is not intended to be used in
+        ///         application code.
+        ///     </para>
+        /// </summary>
+        IDbSetInitializer IInfrastructure<IDbSetInitializer>.Instance => DbSetInitializer;
+
+        /// <summary>
+        ///     <para>
+        ///         Gets the cached <see cref="IEntityFinderSource" />
+        ///     </para>
+        ///     <para>
+        ///         This property is intended for use by extension methods. It is not intended to be used in
+        ///         application code.
+        ///     </para>
+        /// </summary>
+        IEntityFinderSource IInfrastructure<IEntityFinderSource>.Instance => EntityFinderSource;
+
+        /// <summary>
+        ///     <para>
+        ///         Gets the cached <see cref="IAsyncQueryProvider" />
+        ///     </para>
+        ///     <para>
+        ///         This property is intended for use by extension methods. It is not intended to be used in
+        ///         application code.
+        ///     </para>
+        /// </summary>
+        IAsyncQueryProvider IInfrastructure<IAsyncQueryProvider>.Instance => QueryProvider;
+
+        /// <summary>
+        ///     <para>
+        ///         Gets the cached <see cref="IStateManager" />
+        ///     </para>
+        ///     <para>
+        ///         This property is intended for use by extension methods. It is not intended to be used in
+        ///         application code.
+        ///     </para>
+        /// </summary>
+        IStateManager IInfrastructure<IStateManager>.Instance => StateManager;
+
+        /// <summary>
+        ///     <para>
+        ///         Gets the cached <see cref="IChangeDetector" />
+        ///     </para>
+        ///     <para>
+        ///         This property is intended for use by extension methods. It is not intended to be used in
+        ///         application code.
+        ///     </para>
+        /// </summary>
+        IChangeDetector IInfrastructure<IChangeDetector>.Instance => ChangeDetector;
 
         /// <summary>
         ///     <para>
@@ -468,9 +535,7 @@ namespace Microsoft.EntityFrameworkCore
         {
             if (entry.EntityState == EntityState.Detached)
             {
-                (_graphAttacher
-                 ?? (_graphAttacher = InternalServiceProvider.GetRequiredService<IEntityGraphAttacher>()))
-                    .AttachGraph(entry, entityState);
+                GraphAttacher.AttachGraph(entry, entityState);
             }
             else
             {
@@ -485,15 +550,16 @@ namespace Microsoft.EntityFrameworkCore
         {
             if (entry.EntityState == EntityState.Detached)
             {
-                await (_graphAttacher
-                       ?? (_graphAttacher = InternalServiceProvider.GetRequiredService<IEntityGraphAttacher>()))
-                    .AttachGraphAsync(entry, entityState, cancellationToken);
+                await GraphAttacher.AttachGraphAsync(entry, entityState, cancellationToken);
             }
             else
             {
                 await entry.SetEntityStateAsync(entityState, acceptChanges: true, cancellationToken: cancellationToken);
             }
         }
+
+        private IEntityGraphAttacher GraphAttacher =>
+            _graphAttacher ?? (_graphAttacher = InternalServiceProvider.GetRequiredService<IEntityGraphAttacher>());
 
         /// <summary>
         ///     Begins tracking the given entity, and any other reachable entities that are
@@ -1143,13 +1209,19 @@ namespace Microsoft.EntityFrameworkCore
                 throw new InvalidOperationException(CoreStrings.InvalidSetType(typeof(TEntity).ShortDisplayName()));
             }
 
-            return (_setInitializer
-                    ?? (_setInitializer = InternalServiceProvider.GetRequiredService<IDbSetInitializer>())).CreateSet<TEntity>(this);
+            return DbSetInitializer.CreateSet<TEntity>(this);
         }
 
+        private IDbSetInitializer DbSetInitializer
+            => _setInitializer
+               ?? (_setInitializer = InternalServiceProvider.GetRequiredService<IDbSetInitializer>());
+
         private IEntityFinder Finder(Type entityType)
-            => (_entityFinderSource
-                ?? (_entityFinderSource = InternalServiceProvider.GetRequiredService<IEntityFinderSource>())).Create(this, entityType);
+            => EntityFinderSource.Create(this, entityType);
+
+        private IEntityFinderSource EntityFinderSource
+            => _entityFinderSource
+               ?? (_entityFinderSource = InternalServiceProvider.GetRequiredService<IEntityFinderSource>());
 
         /// <summary>
         ///     Finds an entity with the given primary key values. If an entity with the given primary key values

@@ -53,9 +53,6 @@ namespace Microsoft.EntityFrameworkCore.Query
             Check.NotNull(concurrencyDetector, nameof(concurrencyDetector));
 
             CurrentDbContext = currentContext;
-            StateManager = new LazyRef<IStateManager>(() => currentContext.Context.GetService<IStateManager>());
-            ChangeDetector = new LazyRef<IChangeDetector>(() => currentContext.Context.GetService<IChangeDetector>());
-
             ConcurrencyDetector = concurrencyDetector;
         }
 
@@ -67,12 +64,12 @@ namespace Microsoft.EntityFrameworkCore.Query
         /// <summary>
         ///     Gets the change detector.
         /// </summary>
-        public LazyRef<IChangeDetector> ChangeDetector { get; }
+        public IChangeDetector ChangeDetector => ((IInfrastructure<IChangeDetector>)CurrentDbContext.Context).Instance;
 
         /// <summary>
         ///     Gets the state manager.
         /// </summary>
-        public LazyRef<IStateManager> StateManager { get; }
+        public IStateManager StateManager => ((IInfrastructure<IStateManager>)CurrentDbContext.Context).Instance;
 
         /// <summary>
         ///     Gets the concurrency detector.
