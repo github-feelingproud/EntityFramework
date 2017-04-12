@@ -41,6 +41,7 @@ namespace Microsoft.EntityFrameworkCore.Query.ExpressionVisitors.Internal
         private bool _innerKeySelectorRequiresNullRefProtection;
         private bool _insideInnerKeySelector;
         private bool _insideOrderBy;
+        private bool _insideMaterializeCollectionNavigation;
 
         private class NavigationJoin
         {
@@ -194,8 +195,7 @@ namespace Microsoft.EntityFrameworkCore.Query.ExpressionVisitors.Internal
         private void InsertNavigationJoin(NavigationJoin navigationJoin)
         {
             var insertionIndex = 0;
-            var bodyClause = navigationJoin.QuerySource as IBodyClause;
-            if (bodyClause != null)
+            if (navigationJoin.QuerySource is IBodyClause bodyClause)
             {
                 insertionIndex = _queryModel.BodyClauses.IndexOf(bodyClause) + 1;
             }
@@ -507,14 +507,18 @@ namespace Microsoft.EntityFrameworkCore.Query.ExpressionVisitors.Internal
                     : Expression.Call(node.Method, propertyArguments[0], propertyArguments[1]);
             }
 
+            var insideMaterializeCollectionNavigation = _insideMaterializeCollectionNavigation;
+            if (node.Method.MethodIsClosedFormOf(CollectionNavigationSubqueryInjector.MaterializeCollectionNavigationMethodInfo))
+            {
+                _insideMaterializeCollectionNavigation = true;
+            }
+
             var newObject = Visit(node.Object);
             var newArguments = node.Arguments.Select(Visit);
 
             if (newObject != node.Object)
             {
-                var nullConditionalExpression = newObject as NullConditionalExpression;
-
-                if (nullConditionalExpression != null)
+                if (newObject is NullConditionalExpression nullConditionalExpression)
                 {
                     var newMethodCallExpression = node.Update(nullConditionalExpression.AccessOperation, newArguments);
 
@@ -522,7 +526,14 @@ namespace Microsoft.EntityFrameworkCore.Query.ExpressionVisitors.Internal
                 }
             }
 
-            return node.Update(newObject, newArguments);
+            var newExpression = node.Update(newObject, newArguments);
+
+            if (node.Method.MethodIsClosedFormOf(CollectionNavigationSubqueryInjector.MaterializeCollectionNavigationMethodInfo))
+            {
+                _insideMaterializeCollectionNavigation = insideMaterializeCollectionNavigation;
+            }
+
+            return newExpression;
         }
 
         private Expression RewriteNavigationProperties(
@@ -543,10 +554,10 @@ namespace Microsoft.EntityFrameworkCore.Query.ExpressionVisitors.Internal
 
                 var additionalFromClauseBeingProcessed = _navigationRewritingQueryModelVisitor.AdditionalFromClauseBeingProcessed;
                 if (additionalFromClauseBeingProcessed != null
-                    && navigations.Last().IsCollection())
+                    && navigations.Last().IsCollection()
+                    && !_insideMaterializeCollectionNavigation)
                 {
-                    var fromSubqueryExpression = additionalFromClauseBeingProcessed.FromExpression as SubQueryExpression;
-                    if (fromSubqueryExpression != null)
+                    if (additionalFromClauseBeingProcessed.FromExpression is SubQueryExpression fromSubqueryExpression)
                     {
                         return RewriteSelectManyInsideSubqueryIntoJoins(
                             fromSubqueryExpression, 
@@ -570,7 +581,7 @@ namespace Microsoft.EntityFrameworkCore.Query.ExpressionVisitors.Internal
                     }
                 }
 
-                if (_insideInnerKeySelector)
+                if (_insideInnerKeySelector && !_insideMaterializeCollectionNavigation)
                 {
                     var translated = CreateSubqueryForNavigations(
                         outerQuerySourceReferenceExpression,
@@ -587,8 +598,7 @@ namespace Microsoft.EntityFrameworkCore.Query.ExpressionVisitors.Internal
                     propertyCreator,
                     conditionalAccessPropertyCreator);
 
-                var resultQsre = navigationResultExpression as QuerySourceReferenceExpression;
-                if (resultQsre != null)
+                if (navigationResultExpression is QuerySourceReferenceExpression resultQsre)
                 {
                     foreach (var includeResultOperator in _queryModelVisitor.QueryCompilationContext.QueryAnnotations
                         .OfType<IncludeResultOperator>()
@@ -674,8 +684,8 @@ namespace Microsoft.EntityFrameworkCore.Query.ExpressionVisitors.Internal
                 var qsre = (declaringExpression as MemberExpression)?.Expression as QuerySourceReferenceExpression;
                 if (qsre == null)
                 {
-                    var methodCallExpression = declaringExpression as MethodCallExpression;
-                    if (methodCallExpression != null && EntityQueryModelVisitor.IsPropertyMethod(methodCallExpression.Method))
+                    if (declaringExpression is MethodCallExpression methodCallExpression
+                        && EntityQueryModelVisitor.IsPropertyMethod(methodCallExpression.Method))
                     {
                         qsre = methodCallExpression.Arguments[0] as QuerySourceReferenceExpression;
                     }
@@ -1232,7 +1242,7 @@ namespace Microsoft.EntityFrameworkCore.Query.ExpressionVisitors.Internal
 
         private class NavigationRewritingQueryModelVisitor : ExpressionTransformingQueryModelVisitor<NavigationRewritingExpressionVisitor>
         {
-            private readonly SubqueryInjector _subqueryInjector;
+            private readonly CollectionNavigationSubqueryInjector _subqueryInjector;
             private readonly bool _navigationExpansionSubquery;
 
             public AdditionalFromClause AdditionalFromClauseBeingProcessed { get; private set; }
@@ -1243,7 +1253,7 @@ namespace Microsoft.EntityFrameworkCore.Query.ExpressionVisitors.Internal
                 bool navigationExpansionSubquery)
                 : base(transformingVisitor)
             {
-                _subqueryInjector = new SubqueryInjector(queryModelVisitor);
+                _subqueryInjector = new CollectionNavigationSubqueryInjector(queryModelVisitor, shouldInject: true);
                 _navigationExpansionSubquery = navigationExpansionSubquery;
             }
 
@@ -1340,8 +1350,7 @@ namespace Microsoft.EntityFrameworkCore.Query.ExpressionVisitors.Internal
 
             public override void VisitResultOperator(ResultOperatorBase resultOperator, QueryModel queryModel, int index)
             {
-                var allResultOperator = resultOperator as AllResultOperator;
-                if (allResultOperator != null)
+                if (resultOperator is AllResultOperator allResultOperator)
                 {
                     Func<AllResultOperator, Expression> expressionExtractor = o => o.Predicate;
                     Action<AllResultOperator, Expression> adjuster = (o, e) => o.Predicate = e;
@@ -1350,8 +1359,7 @@ namespace Microsoft.EntityFrameworkCore.Query.ExpressionVisitors.Internal
                     return;
                 }
 
-                var containsResultOperator = resultOperator as ContainsResultOperator;
-                if (containsResultOperator != null)
+                if (resultOperator is ContainsResultOperator containsResultOperator)
                 {
                     Func<ContainsResultOperator, Expression> expressionExtractor = o => o.Item;
                     Action<ContainsResultOperator, Expression> adjuster = (o, e) => o.Item = e;
@@ -1360,8 +1368,7 @@ namespace Microsoft.EntityFrameworkCore.Query.ExpressionVisitors.Internal
                     return;
                 }
 
-                var skipResultOperator = resultOperator as SkipResultOperator;
-                if (skipResultOperator != null)
+                if (resultOperator is SkipResultOperator skipResultOperator)
                 {
                     Func<SkipResultOperator, Expression> expressionExtractor = o => o.Count;
                     Action<SkipResultOperator, Expression> adjuster = (o, e) => o.Count = e;
@@ -1370,8 +1377,7 @@ namespace Microsoft.EntityFrameworkCore.Query.ExpressionVisitors.Internal
                     return;
                 }
 
-                var takeResultOperator = resultOperator as TakeResultOperator;
-                if (takeResultOperator != null)
+                if (resultOperator is TakeResultOperator takeResultOperator)
                 {
                     Func<TakeResultOperator, Expression> expressionExtractor = o => o.Count;
                     Action<TakeResultOperator, Expression> adjuster = (o, e) => o.Count = e;
@@ -1380,10 +1386,9 @@ namespace Microsoft.EntityFrameworkCore.Query.ExpressionVisitors.Internal
                     return;
                 }
 
-                var groupResultOperator = resultOperator as GroupResultOperator;
-                if (groupResultOperator != null)
+                if (resultOperator is GroupResultOperator groupResultOperator)
                 {
-                    groupResultOperator.ElementSelector 
+                    groupResultOperator.ElementSelector
                         = _subqueryInjector.Visit(groupResultOperator.ElementSelector);
 
                     var originalKeySelectorType = groupResultOperator.KeySelector.Type;
@@ -1419,67 +1424,6 @@ namespace Microsoft.EntityFrameworkCore.Query.ExpressionVisitors.Internal
                     originalType);
 
                 adjuster(resultOperator, translatedExpression);
-            }
-
-            private class SubqueryInjector : RelinqExpressionVisitor
-            {
-                private readonly EntityQueryModelVisitor _queryModelVisitor;
-
-                public SubqueryInjector(EntityQueryModelVisitor queryModelVisitor)
-                {
-                    _queryModelVisitor = queryModelVisitor;
-                }
-
-                protected override Expression VisitMember(MemberExpression node)
-                {
-                    Check.NotNull(node, nameof(node));
-
-                    return
-                        _queryModelVisitor.BindNavigationPathPropertyExpression(
-                            node,
-                            (properties, querySource) =>
-                                {
-                                    var navigations = properties.OfType<INavigation>().ToList();
-                                    var collectionNavigation = navigations.SingleOrDefault(n => n.IsCollection());
-
-                                    return collectionNavigation != null
-                                        ? InjectSubquery(node, collectionNavigation)
-                                        : default(Expression);
-                                })
-                        ?? base.VisitMember(node);
-                }
-
-                private static Expression InjectSubquery(Expression expression, INavigation collectionNavigation)
-                {
-                    var targetType = collectionNavigation.GetTargetType().ClrType;
-                    var mainFromClause = new MainFromClause(targetType.Name.Substring(0, 1).ToLowerInvariant(), targetType, expression);
-                    var selector = new QuerySourceReferenceExpression(mainFromClause);
-
-                    var subqueryModel = new QueryModel(mainFromClause, new SelectClause(selector));
-                    var subqueryExpression = new SubQueryExpression(subqueryModel);
-
-                    var resultCollectionType = collectionNavigation.GetCollectionAccessor().CollectionType;
-
-                    var result = Expression.Call(
-                        _materializeCollectionNavigationMethodInfo.MakeGenericMethod(targetType),
-                        Expression.Constant(collectionNavigation), subqueryExpression);
-
-                    return resultCollectionType.GetTypeInfo().IsGenericType && resultCollectionType.GetGenericTypeDefinition() == typeof(ICollection<>)
-                        ? (Expression)result
-                        : Expression.Convert(result, resultCollectionType);
-                }
-
-                private static readonly MethodInfo _materializeCollectionNavigationMethodInfo
-                    = typeof(SubqueryInjector).GetTypeInfo()
-                        .GetDeclaredMethod(nameof(MaterializeCollectionNavigation));
-
-                [UsedImplicitly]
-                private static ICollection<TEntity> MaterializeCollectionNavigation<TEntity>(INavigation navigation, IEnumerable<object> elements)
-                {
-                    var collection = navigation.GetCollectionAccessor().Create(elements);
-
-                    return (ICollection<TEntity>)collection;
-                }
             }
         }
     }
